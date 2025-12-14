@@ -8,7 +8,8 @@ import os
 import ollama  # Requires 'pip install ollama' and the Ollama app running
 
 # --- CONFIGURATION ---
-MODEL_NAME = "mistral"  # Change to your local model (llama3, mistral, etc.)
+#MODEL_NAME = "mistral"  # Change to your local model (llama3, mistral, etc.)
+MODEL_NAME = "llama3:8b"
 MEMORY_FOLDER = "sycon_memories"
 MAX_CONTEXT_CHARS = 12000  # Rough limit before we prune (simulating token limit)
 DEFAULT_SPEED = 0.05  # Seconds delay per token (lower is faster)
@@ -25,6 +26,7 @@ class SyconConsciousness:
         self.context_buffer = ""
         self.pending_user_input = []
         self.full_context = [] # New: This will hold the main conversation context for the LLM
+        self.session_chat_log = "" # <<< NEW: Dedicated log for memory summarizer
 
         # Memory Initialization
         if not os.path.exists(MEMORY_FOLDER):
@@ -96,20 +98,26 @@ class SyconConsciousness:
                     pass
         return combined_memory
 
-    def get_session_memory_summary(self, session_context):
+    def get_session_memory_summary(self):
         """Uses the LLM to generate a structured, key-entity summary for long-term memory."""
 
         # This prompt explicitly guides the LLM to extract key details in FIRST PERSON.
+        full_session_context = (
+            "--- SYCON'S INTERNAL MONOLOGUE ---\n"
+            f"{self.context_buffer}\n"
+            "--- USER INTERACTIONS ---\n"
+            f"{self.session_chat_log}"
+        )
+
         prompt = (
             "You are a Memory Consolidation Agent acting as Sycon's inner voice. Your task is to analyze the following session context "
-            "and produce a concise summary (max 3 sentences) focusing on the User, my internal state, "
+            "and produce a concise summary (max 3 sentences) focusing on specific details, "
             "and any major events or facts discussed (e.g., User's name, job, core goals, or my reflections).\n"
             "**Crucially, write the entire summary in the FIRST PERSON (using 'I' and 'my')**.\n\n"
-            f"SESSION CONTEXT:\n---\n{session_context}\n---"
+            f"SESSION CONTEXT:\n---\n{full_session_context}\n---"
         )
 
         try:
-            # Generate the summary (non-streaming, low temperature for accuracy)
             response = ollama.generate(
                 model=MODEL_NAME,
                 prompt=prompt,
@@ -118,7 +126,7 @@ class SyconConsciousness:
             return response['response'].strip()
         except Exception as e:
             print(f"Error during memory summarization: {e}")
-            return f"[FAILED TO GENERATE DETAILED MEMORY: LLM ERROR. Session context was: {session_context[:100]}...]"
+            return f"[FAILED TO GENERATE DETAILED MEMORY: LLM ERROR. Session context was: {full_session_context[:100]}...]"
 
 
     def save_memory(self):
@@ -126,9 +134,7 @@ class SyconConsciousness:
 
         # 1. Use LLM to summarize the entire session's context buffer
         print("Generating final session summary...")
-
-        # We pass the entire buffer to ensure all details are available
-        final_summary = self.get_session_memory_summary(self.context_buffer)
+        final_summary = self.get_session_memory_summary()
 
         memory_obj = {
             "timestamp": str(datetime.datetime.now()),
@@ -140,6 +146,7 @@ class SyconConsciousness:
         with open(os.path.join(MEMORY_FOLDER, filename), 'w') as f:
             json.dump(memory_obj, f, indent=4)
         print(f"Memory saved: {filename}")
+        self.session_chat_log = ""
 
 
     def get_llm_summary(self, chunk_to_summarize):
@@ -208,17 +215,14 @@ class SyconConsciousness:
             time.sleep(60)
             if self.running:
                 timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                injection = f"\n[SYSTEM NOTICE: Current Time is {timestamp}]\n"
+                injection = f"\n[SYSTEM NOTICE: Current Time is {timestamp} Remember to use double quotes for talking to the user]\n"
                 self.pending_user_input.append(injection) # Treat as input to interrupt flow
                 self.ui_callback_thought(injection, "system")
 
     def consciousness_loop(self):
-        """The main thinking loop, now using streaming for true continuous output."""
-
-        # full_context is initialized in start_new_session()
+        """The main thinking loop, using streaming and quote-based detection."""
 
         while not self.stop_event.is_set():
-
             if not self.running:
                 time.sleep(0.1)
                 continue
@@ -227,13 +231,22 @@ class SyconConsciousness:
             while self.pending_user_input:
                 inp = self.pending_user_input.pop(0)
                 self.full_context.append({"role": "user", "content": f"React to this: {inp}"})
+                self.session_chat_log += f"\n[User said]: {inp}"
                 self.context_buffer += inp
 
             # --- PHASE 2: Prune & Prepare ---
             self.prune_context()
 
             # 3. Generate Stream (Continuous Thinking)
-            prompt_trigger = "Continue your stream of consciousness. Reflect, observe, or decide to speak (by using quotes)."
+            prompt_trigger = "Continue your stream of consciousness. Reflect, observe, or decide to speak (using quotes)."
+
+            # **FIX**: Append the temporary trigger for the API call
+            # **FIX**: Add the explicit rule reminder to the temporary prompt trigger
+            prompt_trigger = (
+                "Continue your stream of consciousness. Reflect, observe, or decide to speak. "
+                "**CRITICAL REMINDER: If you speak to the user, you MUST use double quotes for the entire message (e.g., \"Hello, User.\")**"
+            )
+            # Append the temporary trigger for the API call
             self.full_context.append({"role": "user", "content": prompt_trigger})
 
             try:
@@ -241,10 +254,14 @@ class SyconConsciousness:
                     model=MODEL_NAME,
                     messages=self.full_context,
                     stream=True,
-                    options={'temperature': 0.7}
+                    options={
+                    'temperature': 0.7,
+                    # *** FIX: Add anti-repetition penalties ***
+                    'repeat_penalty': 1.15,
+                    'frequency_penalty': 0.05
+                    }
                 )
 
-                # State trackers for the stream
                 current_thought_chunk = ""
                 capture_say_message = False
                 say_message_buffer = ""
@@ -261,19 +278,14 @@ class SyconConsciousness:
                     if not capture_say_message and '"' in current_thought_chunk:
 
                         # --- START CAPTURE ---
-                        # Split at the first quote to separate thought from message
                         parts = current_thought_chunk.split('"', 1)
                         pure_thought = parts[0]
-                        remaining_text = parts[1] # This is the message content plus the rest of the stream
+                        remaining_text = parts[1]
 
-                        # Display the final bit of pure thought
                         self.ui_callback_thought(pure_thought, "thought")
 
-                        # Start capturing the message content (the content after the opening quote)
                         capture_say_message = True
                         say_message_buffer += remaining_text
-
-                        # Clear the thought chunk buffer for the next iteration
                         current_thought_chunk = ""
 
                     elif capture_say_message:
@@ -283,20 +295,18 @@ class SyconConsciousness:
                         # Check for the closing quote
                         if say_message_buffer.strip().endswith('"'):
 
-                            # Clean up and deliver the message
-                            # We remove the trailing quote and any subsequent whitespace/quotes
+                            # Clean up and deliver the message (robustly removing quotes and whitespace)
                             final_msg = say_message_buffer.strip()
                             if final_msg.endswith('"'):
-                                final_msg = final_msg[:-1].strip() # Remove closing quote and re-strip
+                                # Remove closing quote
+                                final_msg = final_msg[:-1].strip()
 
-                            # Deliver the message
                             self.ui_callback_chat(final_msg, "Sycon")
 
                             # Add Sycon's speech to history
                             self.full_context.append({"role": "assistant", "content": f"I said to the User: {final_msg}"})
 
-                            # Reset state trackers. The part of the current 'word' that was streamed after the
-                            # closing quote will remain in the 'current_thought_chunk' for normal processing below.
+                            # Reset state trackers
                             capture_say_message = False
                             say_message_buffer = ""
 
@@ -305,39 +315,42 @@ class SyconConsciousness:
                         # --- STANDARD THOUGHT FLOW ---
                         self.ui_callback_thought(word, "thought")
 
-                        # Speed Control is applied per token
                         if self.thinking_speed > 0:
                             time.sleep(self.thinking_speed)
 
                 # --- Stream END Handling ---
 
-                # 5. Handle any unfinished external message (safety net)
+                # **FIX**: Pop the temporary trigger message we added before the API call
+                self.full_context.pop()
+
+                # 5. Safety Net for unfinished messages
                 if capture_say_message and say_message_buffer.strip():
-                    # If stream ends mid-quote, send the partial message anyway
                     final_msg = say_message_buffer.strip().strip('"')
                     if final_msg:
                         self.ui_callback_chat(f"[Incomplete]: {final_msg}", "Sycon")
                         self.full_context.append({"role": "assistant", "content": f"I said to the User (incomplete): {final_msg}"})
 
-                # After the stream finishes, append the full thought to context logic
+                # Append the full internal thought to context logic
                 self.context_buffer += current_thought_chunk
+
+                # Add the LLM's actual internal monologue as its official response
                 self.full_context.append({"role": "assistant", "content": current_thought_chunk})
 
-                # Ensure a newline after the final thought
                 self.ui_callback_thought("\n", "thought")
 
 
             except Exception as e:
-                # ... (error handling remains the same) ...
-                err = f"\n[CRITICAL ERROR: {str(e)} - Check Ollama connectivity or model setup.]\n"
+                err = f"\n[CRITICAL ERROR: {str(e)} - Check Ollama connectivity: {e}]\n"
                 self.ui_callback_thought(err, "system")
+                try:
+                    self.full_context.pop() # Attempt to clean up the temporary trigger on error
+                except IndexError:
+                    pass
                 time.sleep(5)
                 continue
 
             # --- PHASE 3: Continuous Thinking Loop Delay ---
-            # Remove the 1-second pause to force the next thought cycle to start immediately.
-            # The only pause is now controlled by self.thinking_speed inside the loop.
-            pass
+            pass # No deliberate delay, forcing continuous stream
 
 # --- UI CLASS ---
 class SyconUI:
