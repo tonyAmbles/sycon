@@ -1,0 +1,2 @@
+# sycon
+Consciousness Simulator
