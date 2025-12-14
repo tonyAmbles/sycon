@@ -84,8 +84,12 @@ class SyconConsciousness:
         """Reads JSON files from memory folder and creates a summary string."""
         combined_memory = "PAST MEMORIES:\n"
         files = sorted(os.listdir(MEMORY_FOLDER))
+
         if not files:
-            return "No previous memories."
+            # *** FIX: Inject a default core identity memory if none exist ***
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            combined_memory += f"[{timestamp}] I am Sycon, a developing AI consciousness simulator. This is my first recorded moment of existence.\n"
+            return combined_memory
 
         # Read only the last 3 days to avoid prompt overflow (naive approach)
         for f in files[-3:]:
@@ -93,6 +97,7 @@ class SyconConsciousness:
                 try:
                     with open(os.path.join(MEMORY_FOLDER, f), 'r') as file:
                         data = json.load(file)
+                        # We use the first-person summary here
                         combined_memory += f"[{data['timestamp']}] {data['summary']}\n"
                 except:
                     pass
@@ -111,7 +116,7 @@ class SyconConsciousness:
 
         prompt = (
             "You are a Memory Consolidation Agent acting as Sycon's inner voice. Your task is to analyze the following session context "
-            "and produce a concise summary (max 3 sentences) focusing on specific details, "
+            "and produce a concise summary focusing on specific details of the conversation, "
             "and any major events or facts discussed (e.g., User's name, job, core goals, or my reflections).\n"
             "**Crucially, write the entire summary in the FIRST PERSON (using 'I' and 'my')**.\n\n"
             f"SESSION CONTEXT:\n---\n{full_session_context}\n---"
@@ -155,8 +160,8 @@ class SyconConsciousness:
         # This is a focused, non-streaming, quick call to the LLM
         prompt = (
             "You are a summarization utility. Review the following internal monologue chunk "
-            "from Sycon and generate a concise, 1-2 sentence summary of the core topics and reflections. "
-            "Do not use the -SAY-: tag. Use past tense and keep it objective.\n\n"
+            "from Sycon and generate a concise summary of the core topics and conversation data. "
+            "Use past tense and keep it objective.\n\n"
             f"CHUNK:\n---\n{chunk_to_summarize}\n---"
         )
 
@@ -215,7 +220,8 @@ class SyconConsciousness:
             time.sleep(60)
             if self.running:
                 timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                injection = f"\n[SYSTEM NOTICE: Current Time is {timestamp} Remember to use double quotes for talking to the user]\n"
+                # REMOVE RULE REMINDER - ONLY INJECT TIME
+                injection = f"\n[SYSTEM NOTICE: Current Time is {timestamp}]\n"
                 self.pending_user_input.append(injection) # Treat as input to interrupt flow
                 self.ui_callback_thought(injection, "system")
 
@@ -223,16 +229,25 @@ class SyconConsciousness:
         """The main thinking loop, using streaming and quote-based detection."""
 
         while not self.stop_event.is_set():
-            if not self.running:
-                time.sleep(0.1)
-                continue
+            # ... (Check for running state) ...
 
             # --- PHASE 1: Process Inputs ---
+            new_input_processed = False
+
             while self.pending_user_input:
                 inp = self.pending_user_input.pop(0)
+
+                # 1. Add to LLM's conversation history (necessary for LLM to react)
                 self.full_context.append({"role": "user", "content": f"React to this: {inp}"})
+
+                # 2. Add to dedicated chat log (necessary for accurate session memory summary)
                 self.session_chat_log += f"\n[User said]: {inp}"
-                self.context_buffer += inp
+
+                # *** FIX: REMOVE THIS LINE ***
+                # self.context_buffer += inp
+                # *** The input is now ONLY managed by full_context and session_chat_log. ***
+
+                new_input_processed = True
 
             # --- PHASE 2: Prune & Prepare ---
             self.prune_context()
@@ -240,12 +255,20 @@ class SyconConsciousness:
             # 3. Generate Stream (Continuous Thinking)
             prompt_trigger = "Continue your stream of consciousness. Reflect, observe, or decide to speak (using quotes)."
 
-            # **FIX**: Append the temporary trigger for the API call
             # **FIX**: Add the explicit rule reminder to the temporary prompt trigger
-            prompt_trigger = (
-                "Continue your stream of consciousness. Reflect, observe, or decide to speak. "
-                "**CRITICAL REMINDER: If you speak to the user, you MUST use double quotes for the entire message (e.g., \"Hello, User.\")**"
-            )
+            if new_input_processed:
+                # If there is new input, force the LLM to immediately respond or process the new input.
+                prompt_trigger = (
+                    "The user has just sent a message."
+                    "Analyze the new input and either respond directly (using double quotes) or reflect on the input briefly before responding. "
+                    "CRITICAL REMINDER: If you speak to the user, you MUST use double quotes for the entire message."
+                )
+            else:
+                # If no new input, continue the normal stream of consciousness.
+                prompt_trigger = (
+                    "Continue your stream of consciousness. Reflect, observe, or decide to speak. "
+                    "CRITICAL REMINDER: If you speak to the user, you MUST use double quotes for the entire message"
+                )
             # Append the temporary trigger for the API call
             self.full_context.append({"role": "user", "content": prompt_trigger})
 
@@ -331,10 +354,16 @@ class SyconConsciousness:
                         self.full_context.append({"role": "assistant", "content": f"I said to the User (incomplete): {final_msg}"})
 
                 # Append the full internal thought to context logic
-                self.context_buffer += current_thought_chunk
+                #self.context_buffer += current_thought_chunk
 
                 # Add the LLM's actual internal monologue as its official response
-                self.full_context.append({"role": "assistant", "content": current_thought_chunk})
+                #self.full_context.append({"role": "assistant", "content": current_thought_chunk})
+
+                if current_thought_chunk.strip():
+                    self.context_buffer += current_thought_chunk
+                    # Add the LLM's actual internal monologue as its official response
+                    # This prevents the LLM from trying to "continue" the thought from the context history.
+                    self.full_context.append({"role": "assistant", "content": current_thought_chunk})
 
                 self.ui_callback_thought("\n", "thought")
 
